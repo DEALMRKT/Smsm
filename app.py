@@ -22,13 +22,19 @@ dp = Dispatcher()
 db: Client | None = None
 pending_flow = {}
 
-def is_admin(uid: int) -> bool:
-    if uid == OWNER_ID: return True
-    if db is None: return False
+def get_role(uid: int) -> str | None:
+    if uid == OWNER_ID:
+        return "owner"
+    if db is None:
+        return None
     try:
-        return bool(db.table("admins").select("telegram_id").eq("telegram_id", uid).limit(1).execute().data)
+        row = db.table("admins").select("role").eq("telegram_id", uid).limit(1).execute().data
+        return row[0].get("role") if row else None
     except Exception:
-        return False
+        return None
+
+def is_admin(uid: int) -> bool:
+    return get_role(uid) in ("owner", "admin")
 
 def admin_ids():
     rows = db.table("admins").select("telegram_id").execute().data or []
@@ -39,24 +45,43 @@ def admin_ids():
 def log_action(actor, action, target_type=None, target_id=None, details=None):
     db.table("audit_logs").insert({"actor_id":actor,"action":action,"target_type":target_type,"target_id":str(target_id) if target_id else None,"details":details or {}}).execute()
 
-def main_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
+def main_kb(uid: int):
+    rows = [
         [InlineKeyboardButton(text="🎁 Запросить донат", callback_data="request:donation"),
          InlineKeyboardButton(text="💰 Запросить валюту", callback_data="request:currency")],
         [InlineKeyboardButton(text="🏆 Ивенты", callback_data="events"),
          InlineKeyboardButton(text="📨 Поддержка", callback_data="support")],
         [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_requests")]
-    ])
+    ]
+    if get_role(uid):
+        rows.append([InlineKeyboardButton(text="🛡 Панель управления", callback_data="admin:panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def admin_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🕒 Заявки", callback_data="admin:requests"),
-         InlineKeyboardButton(text="📸 Работы по ивентам", callback_data="admin:submissions")],
-        [InlineKeyboardButton(text="➕ Создать ивент", callback_data="admin:create_event"),
-         InlineKeyboardButton(text="📢 Активные ивенты", callback_data="admin:events")],
-        [InlineKeyboardButton(text="👥 Администраторы", callback_data="admin:roles")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")]
-    ])
+def admin_kb(uid: int):
+    role = get_role(uid)
+    rows = []
+    if role == "owner":
+        rows.extend([
+            [InlineKeyboardButton(text="🕒 Заявки", callback_data="admin:requests"),
+             InlineKeyboardButton(text="📸 Работы по ивентам", callback_data="admin:submissions")],
+            [InlineKeyboardButton(text="➕ Создать ивент", callback_data="admin:create_event"),
+             InlineKeyboardButton(text="📢 Активные ивенты", callback_data="admin:events")],
+            [InlineKeyboardButton(text="👥 Управление ролями", callback_data="admin:roles")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")]
+        ])
+        title = "👑 Панель владельца"
+    elif role == "admin":
+        rows.extend([
+            [InlineKeyboardButton(text="🕒 Заявки", callback_data="admin:requests"),
+             InlineKeyboardButton(text="📸 Проверка работ", callback_data="admin:submissions")],
+            [InlineKeyboardButton(text="➕ Создать ивент", callback_data="admin:create_event"),
+             InlineKeyboardButton(text="📢 Активные ивенты", callback_data="admin:events")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")]
+        ])
+        title = "🛡 Панель администратора"
+    else:
+        return None
+    return title, InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def notify_admins(text, reply_markup=None):
     for aid in admin_ids():
@@ -75,14 +100,16 @@ def player_upsert(m: Message):
 async def start(m: Message):
     player_upsert(m)
     text = "🎮 <b>Центр игровых наград</b>\n\nЗдесь можно отправить заявку на донат или валюту, участвовать в ивентах и связаться с администрацией."
-    await m.answer(text, reply_markup=main_kb())
-    if is_admin(m.from_user.id):
-        await m.answer("🔐 <b>Панель администратора</b>", reply_markup=admin_kb())
+    await m.answer(text, reply_markup=main_kb(m.from_user.id))
 
 @dp.message(Command("admin"))
 async def admin_command(m: Message):
     if not is_admin(m.from_user.id): return await m.answer("⛔ Нет доступа.")
-    await m.answer("🔐 <b>Панель администратора</b>", reply_markup=admin_kb())
+    panel = admin_kb(m.from_user.id)
+    if not panel:
+        return await m.answer("⛔ Нет доступа.")
+    title, keyboard = panel
+    await m.answer(f"<b>{title}</b>", reply_markup=keyboard)
 
 @dp.callback_query(F.data.startswith("request:"))
 async def request_start(c: CallbackQuery):
@@ -124,7 +151,7 @@ async def request_note(m: Message):
         InlineKeyboardButton(text="❌ Отклонить",callback_data=f"req:reject:{rid}")
     ]])
     await notify_admins(f"🆕 <b>Новая заявка</b>\nТип: {flow['kind']}\nСумма: {flow['amount']:g}\nИгрок: {who}\nTelegram ID: <code>{m.from_user.id}</code>\nКомментарий: {note or '—'}",kb)
-    await m.answer("✅ Заявка отправлена администрации. Статус можно посмотреть в «Мои заявки».",reply_markup=main_kb())
+    await m.answer("✅ Заявка отправлена администрации. Статус можно посмотреть в «Мои заявки».",reply_markup=main_kb(m.from_user.id))
 
 @dp.callback_query(F.data=="my_requests")
 async def my_requests(c: CallbackQuery):
@@ -261,6 +288,15 @@ async def support_reply(m: Message):
     db.table("support_messages").insert({"telegram_id":pid,"sender_id":m.from_user.id,"sender_role":"admin","body":body}).execute()
     await bot.send_message(pid,"💬 <b>Ответ администрации:</b>\n"+body)
     await m.answer("Ответ отправлен.")
+
+@dp.callback_query(F.data=="admin:panel")
+async def open_admin_panel(c: CallbackQuery):
+    panel = admin_kb(c.from_user.id)
+    if not panel:
+        return await c.answer("⛔ Нет доступа.", show_alert=True)
+    title, keyboard = panel
+    await c.message.answer(f"<b>{title}</b>", reply_markup=keyboard)
+    await c.answer()
 
 @dp.callback_query(F.data=="admin:requests")
 async def admin_requests(c: CallbackQuery):
