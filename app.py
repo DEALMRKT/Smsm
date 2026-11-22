@@ -37,7 +37,7 @@ def is_admin(uid: int) -> bool:
     return get_role(uid) in ("owner", "admin")
 
 def admin_ids():
-    rows = db.table("admins").select("telegram_id").execute().data or []
+    rows = db.table("admins").select("telegram_id").in_("role", ["owner", "admin"]).execute().data or []
     ids = {int(x["telegram_id"]) for x in rows}
     ids.add(OWNER_ID)
     return list(ids)
@@ -53,7 +53,7 @@ def main_kb(uid: int):
          InlineKeyboardButton(text="📨 Поддержка", callback_data="support")],
         [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_requests")]
     ]
-    if get_role(uid):
+    if get_role(uid) in ("owner", "admin"):
         rows.append([InlineKeyboardButton(text="🛡 Панель управления", callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
